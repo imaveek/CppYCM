@@ -11,7 +11,7 @@ import time
 
 from base64 import b64encode, b64decode
 from urllib.request import Request, urlopen
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.error import HTTPError
 
 from .utils import *
@@ -187,14 +187,26 @@ class YcmdHandle(object):
     def _BuildUri(self, handler):
         return urljoin(self._server_location, handler)
 
+    def _ExtraHeaders(self, method, path, body):
+        return {HMAC_HEADER: self._HmacForRequest(method, path, body)}
+
+
+    def _HmacForRequest(self, method, path, body):
+        return b64encode(CreateRequestHmac(method, path, body,
+                                           self._hmac_secret))
+
     def _CallHttp(self, method, handler, data=''):
         method = method.upper()
-        req = Request(self._BuildUri(handler), method=method)
+        request_uri = self._BuildUri(handler)
+        req = Request(request_uri, method=method)
         if isinstance(data, collections.Mapping):
             req.add_header('content-type', 'application/json')
             data = json.dumps(data, ensure_ascii=False)
         data = data.encode('utf-8')
-        req.add_header(HMAC_HEADER, self._HmacForBody(data))
+        hmac = self._HmacForRequest(method,
+                                    urlparse(request_uri).path,
+                                    data)
+        req.add_header(HMAC_HEADER, hmac)
         req.data = data
         try:
             resp = urlopen(req)
@@ -205,17 +217,11 @@ class YcmdHandle(object):
             return ''
 
         readData = resp.read()
-        self._ValidateResponseObject(
-            readData, resp.getheader(HMAC_HEADER).encode('utf-8'))
+        # self._ValidateResponseObject(
+            # readData, resp.getheader(HMAC_HEADER).encode('utf-8'))
 
         return readData.decode('utf-8')
 
-    def _HmacForBody(self, request_body):
-        '''
-        @return bytes
-        bytes request_body
-        '''
-        return b64encode(CreateHexHmac(request_body, self._hmac_secret))
 
     def _ValidateResponseObject(self, content, hmac_header):
         '''
@@ -223,31 +229,27 @@ class YcmdHandle(object):
         bytes content
         bytes hmac_header
         '''
-        if not ContentHexHmacValid(content, self._hmac_secret, b64decode(hmac_header)):
+        if not ContentHmacValid(content, hmac_header, self._hmac_secret):
             raise RuntimeError('Received invalid HMAC for response!')
         return True
 
+def ContentHmacValid(content, hmac_bytes, hmac_secret):
+    return hmac.compare_digest(CreateHmac(content, hmac_secret), hmac_bytes)
 
-def CreateHexHmac(content, hmac_secret):
-    '''
-    @return bytes
-    bytes content
-    bytes hmac_secret
-    '''
-    # Must ensure that hmac_secret is bytes and not unicode
+def CreateRequestHmac(method, path, body, hmac_secret):
+    method_hmac = CreateHmac(method.encode('utf-8'), hmac_secret)
+    path_hmac = CreateHmac(path.encode('utf-8'), hmac_secret)
+    body_hmac = CreateHmac(body, hmac_secret)
+
+    joined_hmac_input = b''.join((method_hmac, path_hmac, body_hmac))
+    return CreateHmac(joined_hmac_input, hmac_secret)
+
+
+def CreateHmac(content, hmac_secret):
+    # Must ensure that hmac_secret is str and not unicode
     return hmac.new(hmac_secret,
                     msg=content,
-                    digestmod=hashlib.sha256).hexdigest().encode('utf-8')
-
-
-def ContentHexHmacValid(content, hmac_secret, hmac_str):
-    '''
-    @return bool
-    bytes content
-    bytes hmac_secret
-    bytes hmac_str
-    '''
-    return hmac.compare_digest(CreateHexHmac(content, hmac_secret), hmac_str)
+                    digestmod=hashlib.sha256).digest()
 
 
 def DefaultSettings():
